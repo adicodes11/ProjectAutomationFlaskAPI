@@ -4,25 +4,23 @@ from pymongo import MongoClient
 from bson.objectid import ObjectId
 import os
 import json
+import re
 from datetime import datetime
 from dotenv import load_dotenv
 from google import genai
 from flask_cors import CORS
 
-# Load environment variables from .env file
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+CORS(app)
 
-# MongoDB configuration: using your TaskFlowNet database
+# MongoDB configuration: using your ProjectAutomation (or ProjectAutomation) database
 MONGO_URI = os.getenv("MONGO_URI")
 client_mongo = MongoClient(MONGO_URI)
-db = client_mongo["TaskFlowNet"]
+db = client_mongo["ProjectAutomation"]  # Change this name if your database is named differently
 
-# Existing projects collection
-projects_collection = db["projects"]
-# Collections for storing analysis documents separately
+# Collections for storing documents
 analysis_collection = db["analysis"]
 raw_collection = db["rawAnalysis"]
 
@@ -30,93 +28,143 @@ raw_collection = db["rawAnalysis"]
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
-def analyze_project_data_with_gemini(project_data):
+def generate_long_response(project_data):
     """
-    Converts project_data into a prompt and calls the Google Gemini 2.0 Flash API
-    to generate detailed project management insights in JSON format.
+    1st AI call: Produce a long, multi-page analysis with no strict JSON constraints.
     """
-    # Convert the project data (a dictionary) into a formatted JSON string.
     project_details = json.dumps(project_data, indent=2)
-    
-    # Build a prompt instructing Gemini to return output in JSON format.
     prompt = (
-        "Given the following project details:\n\n"
-        f"{project_details}\n\n"
-        "Please provide detailed project management insights and recommendations "
-        "as a valid JSON object with the following keys:\n"
-        "- suggestedTime: string (e.g., '10 weeks')\n"
-        "- suggestedBudget: number (e.g., 15000)\n"
-        "- riskAssessment: string\n"
-        "- recommendedTeamStructure: an object with keys like 'lead', 'developers', 'QA'\n"
-        "- memberRecommendations: an object where each key is a team member name and the value is an object with recommendations\n"
+        "You are an expert project management advisor.\n"
+        "Please provide a very detailed, multi-page analysis of this project. "
+        "Discuss scope, budget, timeline, risk factors, team structure, phases, potential pitfalls, advanced ideas, and anything relevant.\n\n"
+        f"Project details:\n{project_details}\n\n"
+        "Feel free to be as thorough as possible. No strict format is required for this step."
     )
-    
-    # Call the Gemini API to generate content based on the prompt.
     response = gemini_client.models.generate_content(
         model="gemini-2.0-flash",
         contents=prompt,
     )
-    
-    # Return the raw text response from Gemini.
     return response.text
 
-@app.route('/api/analyze_project', methods=['POST'])
+def extract_json_from_text(text):
+    """
+    Attempt to extract a JSON object from text using regex.
+    Returns a dictionary if successful, else None.
+    """
+    match = re.search(r'(\{.*\})', text, re.DOTALL)
+    if match:
+        json_str = match.group(1)
+        try:
+            return json.loads(json_str)
+        except Exception as e:
+            print("Error parsing extracted JSON:", e)
+            return None
+    return None
+
+def parse_into_structured_json(raw_text):
+    """
+    2nd AI call: Transform the raw text into a rich JSON object with many key–value pairs.
+    If direct parsing fails, attempts regex extraction as a fallback.
+    """
+    parse_prompt = (
+        "You are an assistant that converts long text into a rich JSON structure.\n"
+        "Given the raw text below, extract and create a JSON object with the following keys exactly:\n"
+        "  - suggestedTime (string)\n"
+        "  - suggestedBudget (number)\n"
+        "  - riskAssessment (string)\n"
+        "  - recommendedTeamStructure (object)\n"
+        "  - memberRecommendations (object)\n"
+        "  - phases (array or object)\n"
+        "  - potentialRisks (array)\n"
+        "  - riskMitigation (array or object)\n"
+        "  - advancedIdeas (array or object)\n"
+        "  - sdlcMethodology (string)\n"
+        "If any field is missing, return an empty string or null for that field.\n"
+        "Return ONLY valid JSON. Do not include any extra text, markdown, or disclaimers.\n\n"
+        f"Raw text:\n{raw_text}\n"
+    )
+    parse_response = gemini_client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=parse_prompt,
+    )
+    structured_text = parse_response.text
+    print("Structured text from Gemini:", structured_text)
+
+    # Try direct parsing first.
+    try:
+        structured_data = json.loads(structured_text)
+        if isinstance(structured_data, dict):
+            return structured_data
+    except Exception as e:
+        print("Direct JSON parsing failed:", e)
+
+    # Fallback: extract JSON block using regex.
+    extracted = extract_json_from_text(structured_text)
+    if extracted:
+        return extracted
+
+    return {"error": "Second-pass parsing failed", "raw": structured_text}
+
+@app.route("/api/analyze_project", methods=["POST"])
 def analyze_project():
     """
-    API endpoint to analyze project data.
-    Accepts a JSON payload with project details (which must include an "_id" field),
-    uses Google Gemini to generate recommendations, and then creates two new documents:
-      - One in the 'analysis' collection with the structured analysis.
-      - One in the 'rawAnalysis' collection with the raw text output.
-    Both documents include a "projectId" field (the ObjectId from the projects collection).
+    Single route that:
+      1. Takes project data (with _id),
+      2. Calls Gemini for a long raw analysis response,
+      3. Stores that raw response in the rawAnalysis collection,
+      4. Calls Gemini again to parse the raw text into a structured JSON,
+      5. Stores the final structured JSON (as key–value pairs) in the analysis collection,
+      6. Returns document references and the structured analysis.
     """
     try:
         project_data = request.get_json()
         if not project_data:
             return jsonify({"message": "No project data provided"}), 400
-        
+
         if "_id" not in project_data:
             return jsonify({"message": "Project _id is required to link analysis data."}), 400
-        
+
         project_id = project_data["_id"]
-        
-        # Get the raw analysis text from Gemini.
-        raw_analysis = analyze_project_data_with_gemini(project_data)
-        
-        # Attempt to parse the raw analysis into a JSON object.
-        try:
-            processed_analysis = json.loads(raw_analysis)
-        except Exception as parse_err:
-            processed_analysis = {"error": "Parsing failed", "raw": raw_analysis}
-        
-        # Create a document for the structured analysis.
-        analysis_doc = {
-            "projectId": ObjectId(project_id),
-            "analysis": processed_analysis,
-            "analysisTimestamp": datetime.utcnow()
-        }
-        analysis_insert_result = analysis_collection.insert_one(analysis_doc)
-        
-        # Create a document for the raw analysis.
+        print("Received project data for ID:", project_id)
+
+        # Step 1: Generate long raw analysis.
+        raw_analysis = generate_long_response(project_data)
+        print("Raw analysis generated.")
+
+        # Step 2: Store the raw response.
         raw_doc = {
             "projectId": ObjectId(project_id),
             "rawAnalysis": raw_analysis,
-            "rawTimestamp": datetime.utcnow()
+            "createdAt": datetime.utcnow()
         }
-        raw_insert_result = raw_collection.insert_one(raw_doc)
-        
+        raw_result = raw_collection.insert_one(raw_doc)
+        print("Raw analysis document inserted with ID:", raw_result.inserted_id)
+
+        # Step 3: Transform raw analysis into a structured JSON.
+        structured_data = parse_into_structured_json(raw_analysis)
+        print("Structured data parsed:", structured_data)
+
+        # Step 4: Store the structured analysis.
+        analysis_doc = {
+            "projectId": ObjectId(project_id),
+            "analysis": structured_data,  # Stored as individual fields in MongoDB document
+            "analysisTimestamp": datetime.utcnow()
+        }
+        analysis_result = analysis_collection.insert_one(analysis_doc)
+        print("Structured analysis document inserted with ID:", analysis_result.inserted_id)
+
+        # Step 5: Return document references and structured analysis.
         return jsonify({
             "message": "Project analysis completed successfully",
-            "analysis_id": str(analysis_insert_result.inserted_id),
-            "raw_analysis_id": str(raw_insert_result.inserted_id),
-            "analysis": processed_analysis
+            "raw_analysis_id": str(raw_result.inserted_id),
+            "analysis_id": str(analysis_result.inserted_id),
+            "analysis": structured_data
         }), 200
 
     except Exception as e:
         print("Error analyzing project:", e)
         return jsonify({"message": "Internal Server Error"}), 500
 
-if __name__ == '__main__':
-    # Use Waitress to serve the app in production.
+if __name__ == "__main__":
     from waitress import serve
     serve(app, host="0.0.0.0", port=8080)
