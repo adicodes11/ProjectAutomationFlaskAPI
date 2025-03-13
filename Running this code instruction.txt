@@ -5,3 +5,10 @@ Command to run chatbot.py                      :     waitress-serve --listen=0.0
 Command to run chat_with_documents.py          :     waitress-serve --listen=0.0.0.0:8082 chat_with_documents:app
 
 Command to run task_assignment_automator.py    :     waitress-serve --listen=0.0.0.0:8083 task_assignment_automator:app
+
+
+
+****|| Note ||****
+If by any chance, the Flask APIs don't work, it maybe due to last change that I did
+--> I changed .env file name to .env.local
+in order to ignore it from git push
