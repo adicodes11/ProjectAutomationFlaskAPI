@@ -7,6 +7,7 @@ import json
 import re
 from datetime import datetime
 from dotenv import load_dotenv
+load_dotenv(".env.local")
 from google import genai
 from flask_cors import CORS
 
