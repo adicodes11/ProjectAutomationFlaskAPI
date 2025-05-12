@@ -1,5 +1,5 @@
 # chatbot.py
-from flask import Flask, request, jsonify
+from flask import Blueprint, request, jsonify
 from pymongo import MongoClient
 from bson.objectid import ObjectId
 import os
@@ -9,12 +9,8 @@ from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv(".env.local")
 from google import genai
-from flask_cors import CORS
 
-load_dotenv()
-
-app = Flask(__name__)
-CORS(app)
+chatbot_bp = Blueprint('chatbot', __name__)
 
 # MongoDB configuration: using your ProjectAutomation database
 MONGO_URI = os.getenv("MONGO_URI")
@@ -88,7 +84,7 @@ def clean_response(text):
 
     return cleaned
 
-@app.route("/api/chatbot", methods=["POST"])
+@chatbot_bp.route("/chatbot", methods=["POST"])
 def chatbot():
     """
     Processes a user query using project context.
@@ -181,7 +177,3 @@ Answer:
     except Exception as e:
         print("Error processing chatbot query:", e)
         return jsonify({"message": "Internal Server Error"}), 500
-
-if __name__ == "__main__":
-    from waitress import serve
-    serve(app, host="0.0.0.0", port=8081)

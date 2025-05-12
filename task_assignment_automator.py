@@ -1,6 +1,6 @@
-# assign_tasks.py
+# assign_tasks_module.py
 
-from flask import Flask, request, jsonify
+from flask import Blueprint, request, jsonify
 from pymongo import MongoClient
 from bson.objectid import ObjectId
 import os
@@ -10,12 +10,10 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 load_dotenv(".env.local")
 from google import genai
-from flask_cors import CORS
+from flask_cors import CORS  # ✅ Added CORS import
 
-load_dotenv()
-
-app = Flask(__name__)
-CORS(app)
+assign_tasks_bp = Blueprint("assign_tasks_bp", __name__)
+CORS(assign_tasks_bp, resources={r"/*": {"origins": "http://localhost:3000"}}, supports_credentials=True)  # ✅ Updated CORS with specific origin
 
 # MongoDB configuration: using your database (e.g., "ProjectAutomation")
 MONGO_URI = os.getenv("MONGO_URI")
@@ -51,7 +49,11 @@ def generate_long_response(project_data):
 
 def extract_json_from_text(text):
     """Try to extract a JSON object from the provided text using regex."""
-    match = re.search(r'(\{.*\})', text, re.DOTALL)
+    # Remove markdown code block markers if present
+    cleaned_text = re.sub(r'```(json)?|```', '', text)
+    
+    # Try to extract JSON object
+    match = re.search(r'(\{.*\})', cleaned_text, re.DOTALL)
     if match:
         json_str = match.group(1)
         try:
@@ -89,7 +91,9 @@ def parse_into_structured_json(raw_text):
     structured_text = parse_response.text
     print("Structured text from Gemini:", structured_text)
     try:
-        structured_data = json.loads(structured_text)
+        # Remove markdown code block markers if present
+        cleaned_text = re.sub(r'```(json)?|```', '', structured_text)
+        structured_data = json.loads(cleaned_text)
         if isinstance(structured_data, dict):
             return structured_data
     except Exception as e:
@@ -149,7 +153,7 @@ def generate_assignment_with_gemini(project_id, confirmed_team, start_date=None,
         )
     prompt += (
         "Generate a JSON object with an 'assignments' key mapping each team member's email to their assignment details. "
-        "Do not include any additional text."
+        "Return ONLY the valid JSON without any markdown code block markers (like ```json or ```) or other text."
     )
     response = gemini_client.models.generate_content(
         model="gemini-2.0-flash",
@@ -157,18 +161,24 @@ def generate_assignment_with_gemini(project_id, confirmed_team, start_date=None,
     )
     generated_text = response.text
     print("Generated assignment text from Gemini:", generated_text)
+    
+    # Remove any markdown code block markers
+    cleaned_text = re.sub(r'```(json)?|```', '', generated_text)
+    
     try:
-        assignment_data = json.loads(generated_text)
+        assignment_data = json.loads(cleaned_text)
         if "assignments" in assignment_data:
             return assignment_data["assignments"]
     except Exception as e:
         print("Error parsing generated assignment JSON:", e)
+    
     extracted = extract_json_from_text(generated_text)
     if extracted and "assignments" in extracted:
         return extracted["assignments"]
     return {}
 
-@app.route("/api/assignTasks", methods=["POST"])
+# Fix route path to match what's used in the frontend
+@assign_tasks_bp.route("/assign_tasks", methods=["POST", "OPTIONS"])
 def assign_tasks():
     """
     Endpoint to assign tasks to confirmed team members for a project.
@@ -181,6 +191,15 @@ def assign_tasks():
       3. Distributes deadlines evenly if timeline information is available.
       4. Upserts each team member's assignment document in the teamassignments collection.
     """
+    # Handle preflight OPTIONS request explicitly
+    if request.method == "OPTIONS":
+        response = jsonify({'message': 'OK'})
+        response.headers.add('Access-Control-Allow-Origin', 'http://localhost:3000')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Methods', 'POST,OPTIONS')
+        response.headers.add('Access-Control-Allow-Credentials', 'true')
+        return response
+        
     try:
         data = request.get_json()
         if not data:
@@ -222,15 +241,17 @@ def assign_tasks():
                 upsert=True
             )
 
-        return jsonify({
+        response = jsonify({
             "message": "Tasks assigned successfully",
             "assignments": assignments
-        }), 200
+        })
+        return response, 200
 
     except Exception as e:
         print("Error in assign_tasks:", e)
         return jsonify({"message": "Internal Server Error", "error": str(e)}), 500
 
-if __name__ == "__main__":
-    from waitress import serve
-    serve(app, host="0.0.0.0", port=8083)
+# Keep the original route as well for backward compatibility
+@assign_tasks_bp.route("/assignTasks", methods=["POST", "OPTIONS"])
+def assign_tasks_original():
+    return assign_tasks()

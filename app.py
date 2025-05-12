@@ -1,5 +1,5 @@
 # app.py
-from flask import Flask, request, jsonify
+from flask import Blueprint, request, jsonify
 from pymongo import MongoClient
 from bson.objectid import ObjectId
 import os
@@ -13,8 +13,8 @@ from flask_cors import CORS
 
 load_dotenv()
 
-app = Flask(__name__)
-CORS(app)
+analyze_project_bp = Blueprint('analyze_project', __name__)
+CORS(analyze_project_bp)
 
 # MongoDB configuration: using your ProjectAutomation (or ProjectAutomation) database
 MONGO_URI = os.getenv("MONGO_URI")
@@ -106,7 +106,7 @@ def parse_into_structured_json(raw_text):
 
     return {"error": "Second-pass parsing failed", "raw": structured_text}
 
-@app.route("/api/analyze_project", methods=["POST"])
+@analyze_project_bp.route("/analyze_project", methods=["POST"])
 def analyze_project():
     """
     Single route that:
@@ -165,7 +165,3 @@ def analyze_project():
     except Exception as e:
         print("Error analyzing project:", e)
         return jsonify({"message": "Internal Server Error"}), 500
-
-if __name__ == "__main__":
-    from waitress import serve
-    serve(app, host="0.0.0.0", port=8080)
